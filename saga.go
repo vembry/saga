@@ -1,17 +1,28 @@
-package saga
+package main
+
+import "log"
+
+type IProcess interface {
+	Start()
+	Stop()
+}
 
 // saga is the client to orchestrate workflows
 type saga struct {
-	workflows []workflow
+	workflows []IProcess
 }
 
 func New() *saga {
 	return &saga{}
 }
 
-func (s *saga) Start() {}
-func (s *saga) Stop()  {}
+func (s *saga) Start() {
+	log.Printf("starting saga...")
+}
+func (s *saga) Stop() {
+	log.Printf("stopping saga...")
+}
 
-func (s *saga) RegisterWorkflows(workflows ...workflow) {
+func (s *saga) RegisterWorkflows(workflows ...IProcess) {
 	s.workflows = workflows
 }

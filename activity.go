@@ -1,4 +1,4 @@
-package saga
+package main
 
 // activity a unit of execution that contain both commit and rollback
 type activity struct{}
