@@ -1,10 +1,19 @@
 package main
 
 // activity a unit of execution that contain both commit and rollback
-type activity struct{}
+type activity struct {
+	name string
 
-func NewActivity() *activity {
-	return &activity{}
+	commit   func()
+	rollback func()
+}
+
+func NewActivity(name string, commit func(), rollback func()) *activity {
+	return &activity{
+		name:     name,
+		commit:   commit,
+		rollback: rollback,
+	}
 }
 
 func (a *activity) Start() {}
