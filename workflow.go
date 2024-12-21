@@ -3,21 +3,39 @@ package main
 import "log"
 
 // workflow is to contain and orchestrate activities
-type workflow struct {
-	activities []activity
+type workflow[T any] struct {
+	name string
+
+	activities []*activity
+
+	// NOTE: directly accessing saga client for now
+	// TODO: this should be changed
+	sagaclient *saga
 }
 
-func NewWorkflow() *workflow {
-	return &workflow{}
+func NewWorkflow[T any](name string) *workflow[T] {
+	return &workflow[T]{
+		name: name,
+	}
 }
 
-func (w *workflow) Start() {
+func (w *workflow[T]) Start(s *saga) {
 	log.Printf("starting workflow...")
+
+	w.sagaclient = s
 }
-func (w *workflow) Stop() {
+func (w *workflow[T]) Stop() {
 	log.Printf("stopping workflow...")
 }
 
-func (s *workflow) RegisterActivities(activities ...activity) {
-	s.activities = activities
+func (w *workflow[T]) RegisterActivities(activities ...*activity) {
+	w.activities = activities
+}
+
+// Execute starts a process of a workflow. A workflow journey starts here
+func (w *workflow[T]) Execute(param T) {
+	// create entry into mongo
+	w.sagaclient.CreateEntry(w.name, param)
+
+	log.Printf("executing '%s' workflow. payload=%+v", w.name, param)
 }
