@@ -4,21 +4,23 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 func main() {
 	// setup db
-	db, err := setupDB()
+	mongo, err := setupMongo()
 	if err != nil {
 		log.Fatalf("error on setting up db. err=%v", err)
 	}
-	defer db.Client().Disconnect(context.Background())
+	defer mongo.Client().Disconnect(context.Background())
 
 	// setup rabbit
 	rabbit, err := setupRabbit()
@@ -27,84 +29,192 @@ func main() {
 	}
 	defer rabbit.Close()
 
-	// setup saga
-	// ==========
+	workflow1 := NewWorkflow("some-workflow", mongo, rabbit)
 
-	// setup sample activities
-	activity1 := NewActivity("activity-1", samplecommit, samplerollback)
-	activity2 := NewActivity("activity-2", samplecommit, samplerollback)
-	activity3 := NewActivity("activity-3", samplecommit, samplerollback)
+	workflow1.Start()
 
-	// setup sample workflow
-	workflow1 := NewWorkflow[sampleparameter](
-		"workflow-1",
-		activity1, activity2, activity3,
+	workflow1.Execute(SomeParameter{})
+
+	watchForExitSignal()
+
+	log.Printf("shutting down")
+}
+
+// WatchForExitSignal is to awaits incoming interrupt signal
+// sent to the service
+func watchForExitSignal() os.Signal {
+	log.Printf("awaiting sigterm...")
+	ch := make(chan os.Signal, 4)
+	signal.Notify(
+		ch,
+		syscall.SIGINT,
+		syscall.SIGQUIT,
+		syscall.SIGTERM,
+		syscall.SIGTSTP,
 	)
 
-	// setup saga client
-	saga := New(
-		db,
-		rabbit,
-		workflow1,
-	)
+	return <-ch
+}
 
-	saga.Start()
+type SomeParameter struct {
+	Field1 string
+	Field2 string
+	Field3 string
+}
 
-	for range 5 {
-		workflow1.Execute(sampleparameter{})
+type activity struct {
+	id string
+
+	commit   func()
+	rollback func()
+}
+
+func NewActivity(activityId string, commit func(), rollback func()) *activity {
+	return &activity{
+		id:       activityId,
+		commit:   commit,
+		rollback: rollback,
 	}
 }
 
-type sampleparameter struct {
-	Field1 string `bson:"field_1"`
-	Field2 string `bson:"field_2"`
-	Field3 string `bson:"field_3"`
+func (a *activity) Commit() {
+	a.commit()
 }
 
-func samplecommit() {
-	log.Printf("this is a commit :D")
-}
-func samplerollback() {
-	log.Printf("this is a rollback :D")
+func (a *activity) Rollback() {
+	a.commit()
 }
 
-// setupRabbit setups rabbit connection for saga purposes
-func setupRabbit() (*amqp.Connection, error) {
-	connection, err := amqp.Dial("amqp://guest:guest@host.docker.internal:5672/")
-	if err != nil {
-		return nil, fmt.Errorf("error on dialing to rabbit. err=%w", err)
+type workflow struct {
+	id     string
+	db     *mongo.Database
+	worker *amqp.Connection
+
+	activities  []*activity
+	activityMap map[string]*activity
+}
+
+func NewWorkflow(
+	workflowId string,
+	db *mongo.Database,
+	worker *amqp.Connection,
+	activities ...*activity,
+) *workflow {
+	activityMap := make(map[string]*activity)
+	for _, activity := range activities {
+		activityMap[activity.id] = activity
 	}
 
-	return connection, nil
+	return &workflow{
+		id:          workflowId,
+		db:          db,
+		worker:      worker,
+		activities:  activities,
+		activityMap: activityMap,
+	}
 }
 
-// setupDB setups db connection to mongo db for saga purposes
-func setupDB() (*mongo.Database, error) {
-	// saga uses mongodb and expects:
-	// - "workflows" collection
-	// ....
+func (w *workflow) Start() {
+	w.startConsumer()
+}
 
-	// establish db connection
-	client, err := mongo.Connect(options.Client().ApplyURI("mongodb://root:root@host.docker.internal:27017"))
-	if err != nil {
-		return nil, fmt.Errorf("error on connecting to db. err=%w", err)
+type workflowStatus string
+
+var (
+	WorkflowStatusNil        workflowStatus = ""
+	WorkflowStatusPending    workflowStatus = "pending"
+	WorkflowStatusInProgress workflowStatus = "in_progress"
+	WorkflowStatusCompleted  workflowStatus = "completed"
+)
+
+type workflowEntry struct {
+	Id                  bson.ObjectID  `bson:"_id"`
+	WorkflowId          string         `bson:"code"`
+	availableActivities []string       `bson:"available_activities"`
+	processedActivities []string       `bson:"processed_activities"`
+	Status              workflowStatus `bson:"status"`
+	State               interface{}    `bson:"state"`
+	CreatedAt           time.Time      `bson:"created_at"`
+	UpdatedAt           time.Time      `bson:"updated_at"`
+}
+
+func (w *workflow) Execute(args interface{}) {
+	log.Printf("executing '%s' workflow. args=%+v", w.id, args)
+
+	activities := make([]string, len(w.activities))
+	for i, activity := range w.activities {
+		activities[i] = activity.id
 	}
 
-	// select db
-	db := client.Database("saga")
-
-	// test insert
-	res, err := db.Collection("tests").InsertOne(context.Background(), map[string]interface{}{
-		"name": "setup",
-		"time": time.Now().String(),
+	// create state
+	res, err := w.db.Collection("workflows").InsertOne(context.Background(), workflowEntry{
+		Id:                  bson.NewObjectID(),
+		WorkflowId:          w.id,
+		availableActivities: activities,
+		processedActivities: make([]string, 0),
+		Status:              WorkflowStatusPending,
+		State:               args,
+		CreatedAt:           time.Now(),
+		UpdatedAt:           time.Now(),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("error on inserting entry into collection. err=%v", err)
+		log.Fatalf("error on inserting one workflow entry. err=%v", err)
 	}
 
-	// log out insertions output
-	val := res.InsertedID.(bson.ObjectID)
-	log.Printf("test inserted=%s", val.Hex())
+	// establish channel
+	ch, err := w.worker.Channel()
+	if ch != nil {
+		defer ch.Close()
+	}
+	if err != nil {
+		log.Fatalf("error on opening new channel to rabbit. err=%v", err)
+	}
 
-	return db, nil
+	// construct worker's payload
+	payload := res.InsertedID.(bson.ObjectID).String()
+
+	// publish message
+	err = ch.Publish("", w.constructWorkerKey(), false, false, amqp.Publishing{
+		ContentType: "text/plain",
+		Body:        []byte(payload),
+	})
+	if err != nil {
+		log.Fatalf("error on publish message to rabbit. err=%v", err)
+	}
+	log.Printf("finished executing '%s' workflow", w.id)
+}
+
+func (w *workflow) constructWorkerKey() string {
+	return fmt.Sprintf("saga.%s", w.id)
+}
+
+func (w *workflow) startConsumer() {
+	// establish channel
+	ch, err := w.worker.Channel()
+	if ch != nil {
+		defer ch.Close()
+	}
+	if err != nil {
+		log.Fatalf("error on opening new channel to rabbit. err=%v", err)
+	}
+
+	// setup consumer to queue
+	messageCh, err := ch.Consume(
+		w.constructWorkerKey(), // queue
+		"",                     // consumer
+		false,                  // auto-ack
+		false,                  // exclusive
+		false,                  // no-local
+		false,                  // no-wait
+		nil,                    // args
+	)
+	if err != nil {
+		log.Fatalf("error on opening message channel. err=%v", err)
+	}
+
+	go func() {
+		for message := range messageCh {
+			log.Printf("consuming '%s' workflow. payload=%s", w.id, string(message.Body))
+		}
+	}()
 }
