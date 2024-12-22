@@ -13,9 +13,13 @@ type workflow[T any] struct {
 	sagaclient *saga
 }
 
-func NewWorkflow[T any](name string) *workflow[T] {
+func NewWorkflow[T any](
+	name string,
+	activities ...*activity,
+) *workflow[T] {
 	return &workflow[T]{
-		name: name,
+		name:       name,
+		activities: activities,
 	}
 }
 
@@ -26,10 +30,6 @@ func (w *workflow[T]) Start(s *saga) {
 }
 func (w *workflow[T]) Stop() {
 	log.Printf("stopping workflow...")
-}
-
-func (w *workflow[T]) RegisterActivities(activities ...*activity) {
-	w.activities = activities
 }
 
 // Execute starts a process of a workflow. A workflow journey starts here

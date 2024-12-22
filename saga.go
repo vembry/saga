@@ -10,7 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
-type IProcess interface {
+type IWorkflow interface {
 	Start(s *saga)
 	Stop()
 }
@@ -20,18 +20,27 @@ type saga struct {
 	db     *mongo.Database
 	rabbit *amqp.Connection
 
-	workflows []IProcess
+	workflows []IWorkflow
 }
 
-func New(db *mongo.Database, rabbit *amqp.Connection) *saga {
+func New(
+	db *mongo.Database,
+	rabbit *amqp.Connection,
+	workflows ...IWorkflow,
+) *saga {
 	return &saga{
-		db:     db,
-		rabbit: rabbit,
+		db:        db,
+		rabbit:    rabbit,
+		workflows: workflows,
 	}
 }
 
 func (s *saga) Start() {
 	log.Printf("starting saga...")
+
+	go func() {
+
+	}()
 
 	for _, workflow := range s.workflows {
 		workflow.Start(s)
@@ -41,23 +50,32 @@ func (s *saga) Stop() {
 	log.Printf("stopping saga...")
 }
 
-func (s *saga) RegisterWorkflows(workflows ...IProcess) {
-	s.workflows = workflows
-}
+type workflowStatus string
+
+var (
+	workflowStatusPending    workflowStatus = "pending"
+	workflowStatusInProgress workflowStatus = "in_progress"
+	workflowStatusCompleted  workflowStatus = "pending"
+)
 
 type workflowEntry struct {
-	Name      string      `bson:"name"`
-	CreatedAt time.Time   `json:"created_at"`
-	Payload   interface{} `bson:"payload"`
+	Name       string         `bson:"name"`
+	Status     workflowStatus `bson:"status"`
+	activities []string       `bson:"activities"`
+	CreatedAt  time.Time      `bson:"created_at"`
+	UpdatedAt  time.Time      `bson:"updated_at"`
+	Payload    interface{}    `bson:"payload"`
 }
 
 func (s *saga) CreateEntry(workflowName string, payload interface{}) {
 	res, err := s.db.Collection("workflows").InsertOne(
 		context.Background(),
 		workflowEntry{
-			Name:      workflowName,
-			CreatedAt: time.Now(),
-			Payload:   payload,
+			Name:       workflowName,
+			Status:     workflowStatusPending,
+			activities: []string{},
+			CreatedAt:  time.Now(),
+			Payload:    payload,
 		},
 	)
 
@@ -66,4 +84,13 @@ func (s *saga) CreateEntry(workflowName string, payload interface{}) {
 	}
 
 	log.Printf("created entry for '%s' workflow. id=%+v", workflowName, res.InsertedID.(bson.ObjectID).Hex())
+}
+
+func (s *saga) fetchReadyWorkflows() {
+	var out []workflowEntry
+	cursor, err := s.db.Collection("workflows").Find(context.Background(), bson.D{{Key: "status", Value: workflowStatusPending}})
+	if err != nil {
+
+	}
+	cursor.Decode(&out)
 }

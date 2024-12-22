@@ -36,12 +36,17 @@ func main() {
 	activity3 := NewActivity("activity-3", samplecommit, samplerollback)
 
 	// setup sample workflow
-	workflow1 := NewWorkflow[sampleparameter]("workflow-1")
-	workflow1.RegisterActivities(activity1, activity2, activity3)
+	workflow1 := NewWorkflow[sampleparameter](
+		"workflow-1",
+		activity1, activity2, activity3,
+	)
 
 	// setup saga client
-	saga := New(db, rabbit)
-	saga.RegisterWorkflows(workflow1)
+	saga := New(
+		db,
+		rabbit,
+		workflow1,
+	)
 
 	saga.Start()
 
