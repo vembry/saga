@@ -191,22 +191,34 @@ func (w *workflow) constructWorkerKey() string {
 func (w *workflow) startConsumer() {
 	// establish channel
 	ch, err := w.worker.Channel()
-	if ch != nil {
-		defer ch.Close()
-	}
 	if err != nil {
 		log.Fatalf("error on opening new channel to rabbit. err=%v", err)
 	}
 
+	// declare queue in case it is missing
+	// for now the config will be defined here
+	// until further cases
+	q, err := ch.QueueDeclare(
+		w.constructWorkerKey(), // name
+		false,                  // durable
+		false,                  // delete when unused
+		false,                  // exclusive
+		false,                  // no-wait
+		nil,                    // arguments
+	)
+	if err != nil {
+		log.Fatalf("error on declaring a queue. workflow='%s'. err=%v", w.id, err)
+	}
+
 	// setup consumer to queue
 	messageCh, err := ch.Consume(
-		w.constructWorkerKey(), // queue
-		"",                     // consumer
-		false,                  // auto-ack
-		false,                  // exclusive
-		false,                  // no-local
-		false,                  // no-wait
-		nil,                    // args
+		q.Name, // queue
+		"",     // consumer
+		false,  // auto-ack
+		false,  // exclusive
+		false,  // no-local
+		false,  // no-wait
+		nil,    // args
 	)
 	if err != nil {
 		log.Fatalf("error on opening message channel. err=%v", err)
@@ -215,6 +227,8 @@ func (w *workflow) startConsumer() {
 	go func() {
 		for message := range messageCh {
 			log.Printf("consuming '%s' workflow. payload=%s", w.id, string(message.Body))
+
+			message.Ack(false)
 		}
 	}()
 }
